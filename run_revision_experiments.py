@@ -80,6 +80,7 @@ def main():
             'curve',
             '--curve-root', str(Path(args.output_dir) / 'curves'),
             '--output', str(output),
+            '--normalize', 'none',
         ]
         print('\n>>> {}'.format(' '.join(command)), flush=True)
         subprocess.run(command, check=True)

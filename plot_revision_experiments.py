@@ -182,7 +182,8 @@ def build_parser():
     curve.add_argument('--output', default='results_revision/figures/overall_average_convergence.png')
     curve.add_argument('--metric', default='train_loss')
     curve.add_argument('--distribution', default='adaptive', choices=['adaptive', 'standard'])
-    curve.add_argument('--normalize', default='first', choices=['none', 'first', 'minmax'])
+    curve.add_argument('--normalize', default='none', choices=['none', 'first', 'minmax'],
+                       help='raw per-dimension loss is the default because flow NLL can be negative')
 
     surface = subparsers.add_parser('z-surface', help='plot before/after AD Z density surfaces')
     surface.add_argument('--before', required=True)

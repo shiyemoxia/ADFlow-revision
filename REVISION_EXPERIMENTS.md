@@ -61,7 +61,9 @@ python run_revision_experiments.py \
 ```
 
 The script writes one CSV per category and creates both PNG and PDF versions of
-the overall mean curve under `results_revision/figures/`.
+the overall mean curve under `results_revision/figures/`. The curve averages the
+raw per-feature-dimension loss. Flow log densities include the Jacobian term, so a
+valid converged loss may be negative and must not be divided by its first value.
 
 ## Experiment 4: Z before/after AD
 
