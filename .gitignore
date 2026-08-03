@@ -1,0 +1,50 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.env
+
+# Editor and OS metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Datasets and downloaded archives
+data/
+datasets/
+mvtec-ad/
+mvtec-loco/
+visa/
+*.tar
+*.tar.gz
+*.tar.xz
+*.zip
+
+# Pretrained models and experiment checkpoints
+CheckPoints/
+weights/
+weights_*/
+*.pt
+*.pth
+*.ckpt
+
+# Experiment outputs and logs
+results/
+results_*/
+output/
+outputs/
+viz/
+runs/
+scalar_*/
+events.out.tfevents.*
+*.log
+
+# Local temporary files
+tmp/
+
+# Unpublished paper and revision task document
+ADFlow.pdf
+实验任务-ADFlow.docx
