@@ -4,13 +4,14 @@ import argparse
 __all__ = ['get_args']
 
 def get_args():
-    parser = argparse.ArgumentParser(description='DAFlow')
-    parser.add_argument('--dataset', default='mvtec', type=str, metavar='D',
-                        help='dataset name: mvtec/stc (default: mvtec)')
-    parser.add_argument('--data_path', default='mvtec', type=str, metavar='D')
+    parser = argparse.ArgumentParser(description='ADFlow revision experiments')
+    parser.add_argument('--dataset', default='mvtec', type=str,
+                        choices=['mvtec', 'mvtec-loco', 'visa', 'visa-new', 'btad'])
+    parser.add_argument('--data-path', default=None, type=str,
+                        help='dataset root; defaults to the sibling dataset folder')
     parser.add_argument('--checkpoint', default='', type=str, metavar='D',
                         help='file with saved checkpoint')
-    parser.add_argument('-cl', '--class-name', default='none', type=str, metavar='C')
+    parser.add_argument('-cl', '--class-name', required=True, type=str, metavar='C')
     parser.add_argument('-enc', '--enc-arch', default='wide_resnet50_2', type=str, metavar='A')
     parser.add_argument('-dec', '--dec-arch', default='daflow', type=str, metavar='A')
     parser.add_argument('-pl', '--pool-layers', default=3, type=int, metavar='L',
@@ -28,9 +29,9 @@ def get_args():
     parser.add_argument('--lr', type=float, default=5e-4, metavar='LR',
                         help='learning rate (default: 2e-4)')
     parser.add_argument('--meta-epochs', type=int, default=25, metavar='N',
-                        help='number of meta epochs to train (default: 25)')
-    parser.add_argument('--sub-epochs', type=int, default=8, metavar='N',
-                        help='number of sub epochs to train (default: 8)')
+                        help='number of reported training epochs')
+    parser.add_argument('--sub-epochs', type=int, default=1, metavar='N',
+                        help='optimizer passes per reported epoch')
     parser.add_argument('--pro', action='store_true', default=False,
                         help='enables estimation of AUPRO metric')
     parser.add_argument('--viz', action='store_true', default=False,
@@ -43,8 +44,29 @@ def get_args():
                         help='disables CUDA training')
     parser.add_argument('--video-path', default='.', type=str, metavar='D',
                         help='video file path')
-    parser.add_argument('--anomaly_g', default='false', type=bool, metavar='A',
-                        help='whether to use anomaly sample')
+    parser.add_argument('--anomaly-g', action='store_true',
+                        help='compatibility flag for pseudo-anomaly training')
+    parser.add_argument('--num-anomalies', default=0, type=int,
+                        help='number of real anomalies mixed into MVTec training (default: 0)')
+    parser.add_argument('--distribution', choices=['adaptive', 'standard'],
+                        default='adaptive',
+                        help='adaptive mixture (AD) or standard Gaussian baseline')
+    parser.add_argument('--num-components', default=0, type=int,
+                        help='AD mixture components; 0 selects the paper setting automatically')
+    parser.add_argument('--lambda-bce', default=0.2, type=float,
+                        help='weight of the pseudo-anomaly BCE term')
+    parser.add_argument('--output-dir', default='results_revision', type=str,
+                        help='directory for curves, latent samples and figures')
+    parser.add_argument('--save-z', action='store_true',
+                        help='save a sample of final-epoch latent vectors')
+    parser.add_argument('--z-layer', default=1, type=int,
+                        help='zero-based feature scale exported by --save-z')
+    parser.add_argument('--z-max-samples', default=5000, type=int,
+                        help='maximum latent vectors saved per run')
+    parser.add_argument('--seed', default=0, type=int,
+                        help='fixed seed; use the same seed for before/after AD comparisons')
+    parser.add_argument('--detect-anomaly', action='store_true',
+                        help='enable slow PyTorch autograd anomaly detection')
 
     args = parser.parse_args()
     

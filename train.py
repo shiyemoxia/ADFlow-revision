@@ -1,55 +1,44 @@
-import os, time
+import datetime
+import os
+import time
+from pathlib import Path
+
 import numpy as np
-import torch, torchvision
+import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from sklearn.metrics import roc_auc_score, auc, precision_recall_curve, average_precision_score
 from skimage.measure import label, regionprops
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from visualize import *
-from model import load_decoder_arch, load_encoder_arch, positionalencoding2d, VarianceNet, activation
-from snet_loss import *
+from model import load_decoder_arch, load_encoder_arch, positionalencoding2d, activation
+from snet_loss import adflow_training_loss, get_logp
 from custom_datasets import *
 from custom_models import *
-from sklearn.decomposition import PCA
-from torch import nn
-from math import log
-import copy
-from torchvision.utils import save_image
-import models_mae
 from model import load_maca, load_VarianceNet
-# for tsne
-from sklearn.manifold import TSNE
-from numpy import reshape
-import seaborn as sns
-import pandas as pd
-import matplotlib.pyplot as plt
 import torchvision.transforms as transforms
+from experiment_utils import CurveRecorder, save_latent_sample
+from utils import Score_Observer, rescale, t2np
 
 OUT_DIR = './viz/'
 
-gamma = 0.0
-
-# clip bound
-log_max = log(1e4)
-log_min = log(1e-8)
-theta = torch.nn.Sigmoid()
-log_theta = torch.nn.LogSigmoid()
-
-def train_meta_epoch(c, epoch, loader, encoder, decoders, variancenets, optimizer, N, writer, pool_layers, acas):
+def train_meta_epoch(c, epoch, loader, encoder, decoders, variancenets, optimizer, writer, pool_layers, acas):
     P = c.condition_vec
     adjust_learning_rate(c, optimizer, epoch)
     I = len(loader)
     decoders = [decoder.train() for decoder in decoders]
     acas = [ema.train() for ema in acas]
     variancenets = [variancenet.train() for variancenet in variancenets]
-    with torch.autograd.set_detect_anomaly(True):
+    epoch_loss = 0.0
+    epoch_nll = 0.0
+    epoch_bce = 0.0
+    epoch_steps = 0
+    with torch.autograd.set_detect_anomaly(c.detect_anomaly):
         for sub_epoch in range(c.sub_epochs):
             start_time = time.time()
-            train_loss = 0.0
-            train_count = 0
-            for i, (data) in enumerate(tqdm(loader)):
+            sub_loss = 0.0
+            sub_steps = 0
+            for i, data in enumerate(tqdm(loader, disable=c.hide_tqdm_bar)):
                 # warm-up learning rate
                 lr = warmup_learning_rate(c, epoch, i+sub_epoch*I, I*c.sub_epochs, optimizer)
                 image, _, mask = data
@@ -75,30 +64,55 @@ def train_meta_epoch(c, epoch, loader, encoder, decoders, variancenets, optimize
 
                     c_r = p.reshape(B, P, S).transpose(1, 2).reshape(E, P)  # BHWxP
                     e_r = e.reshape(B, C, S).transpose(1, 2).reshape(E, C)  # BHWxC
-                    perm = torch.randperm(E)  # BHW
-                    loss, loss_n = 0, 0
-                    c_p = c_r[perm[torch.arange(0, E)]]  # NxP
-                    e_p = e_r[perm[torch.arange(0, E)]]  # NxC
-                    m_p = m_r[perm[torch.arange(0, E)]]  # Nx1
+                    perm = torch.randperm(E, device=c.device)
+                    c_p = c_r[perm]
+                    e_p = e_r[perm]
+                    m_p = m_r[perm]
                     z, log_jac_det = decoder(e_p, [c_p,])
-                    # get guussian var, weigths
-                    var, weights = variancenet(e_r[m_r.squeeze() == 0])
-                    weights.expand(e_r.size(0), -1)
-                    decoder_log_prob1 = get_logp_NA(epoch, C, z, log_jac_det, m_p, var, weights)
-                    log_prob1 = decoder_log_prob1 / C
-                    loss -= log_theta(log_prob1)
-                    train_loss += t2np(loss.sum())
-                    train_count += len(loss)
-                    Epoch = epoch * 4 + sub_epoch
-                    writer.add_scalar("Loss/train", loss.mean(), Epoch)
+
+                    var = weights = None
+                    if c.distribution == 'adaptive':
+                        normal_features = e_r[m_r.squeeze(1) < 0.5]
+                        if normal_features.numel() == 0:
+                            normal_features = e_r
+                        var, weights = variancenet(normal_features)
+                    loss, nll, bce = adflow_training_loss(
+                        C,
+                        z,
+                        log_jac_det,
+                        m_p,
+                        var,
+                        weights,
+                        distribution=c.distribution,
+                        lambda_bce=c.lambda_bce,
+                    )
                     optimizer.zero_grad()
-                    loss.mean().backward()
+                    loss.backward()
                     optimizer.step()
-            mean_train_loss = train_loss / train_count
+
+                    loss_value = float(loss.detach().cpu())
+                    nll_value = float(nll.cpu())
+                    bce_value = float(bce.cpu())
+                    sub_loss += loss_value
+                    sub_steps += 1
+                    epoch_loss += loss_value
+                    epoch_nll += nll_value
+                    epoch_bce += bce_value
+                    epoch_steps += 1
+
+            mean_train_loss = sub_loss / max(sub_steps, 1)
+            writer_step = epoch * c.sub_epochs + sub_epoch
+            writer.add_scalar('Loss/train', mean_train_loss, writer_step)
             if c.verbose:
                 print("---------------{}s seconds---------------".format(time.time() - start_time))
                 print('Epoch: {:d}.{:d} \t train loss: {:.4f}, lr={:.6f}'.format(epoch, sub_epoch, mean_train_loss,
                                                                                      lr))
+    denominator = max(epoch_steps, 1)
+    return {
+        'loss': epoch_loss / denominator,
+        'nll': epoch_nll / denominator,
+        'bce': epoch_bce / denominator,
+    }
 
 
 def test_meta_epoch(c, epoch, loader, encoder, decoders, variancenets, N, pool_layers, acas):
@@ -114,11 +128,14 @@ def test_meta_epoch(c, epoch, loader, encoder, decoders, variancenets, N, pool_l
     image_list = list()
     gt_label_list = list()
     gt_mask_list = list()
-    alpha_list = list()
-    beta_list = list()
     test_dist = [list() for layer in pool_layers]
     test_loss = 0.0
     test_count = 0
+    latent_z = []
+    latent_labels = []
+    latent_log_prob = []
+    collect_z = c.save_z and epoch == c.meta_epochs - 1
+    per_batch_budget = max(1, int(np.ceil(c.z_max_samples / max(len(loader), 1))))
     start = time.time()
     with torch.no_grad():
         for i, (image, label, mask) in enumerate(tqdm(loader, disable=c.hide_tqdm_bar)):
@@ -128,7 +145,8 @@ def test_meta_epoch(c, epoch, loader, encoder, decoders, variancenets, N, pool_l
             gt_label_list.extend(t2np(label))
             gt_mask_list.extend(t2np(mask))
             # data
-            image = image.to(c.device) # single scale
+            image = image.to(c.device)
+            mask_device = mask.to(c.device)
             with torch.no_grad():
                 _ = encoder(image)
             for l, layer in enumerate(pool_layers):
@@ -146,39 +164,75 @@ def test_meta_epoch(c, epoch, loader, encoder, decoders, variancenets, N, pool_l
                 # perm = torch.randperm(E).to(c.device)  # BHW
                 c_r = p.reshape(B, P, S).transpose(1, 2).reshape(E, P)  # BHWxP
                 e_r = e.reshape(B, C, S).transpose(1, 2).reshape(E, C)  # BHWxC
-                m = F.interpolate(mask, size=(H, W), mode='nearest')
+                m = F.interpolate(mask_device, size=(H, W), mode='nearest')
                 m_r = m.reshape(B, 1, S).transpose(1, 2).reshape(E, 1)  # BHWx1
-                perm = torch.randperm(E)  # BHW
                 decoder = decoders[l]
-                v, we = variancenet(e_r)
+                var = weights = None
+                if c.distribution == 'adaptive':
+                    var, weights = variancenet(e_r)
                 FIB = E // N + int(E % N > 0)  # number of fiber batches
+                fiber_budget = max(1, int(np.ceil(per_batch_budget / FIB)))
                 for f in range(FIB):
                     if f < (FIB - 1):
-                        idx = torch.arange(f * N, (f + 1) * N)
+                        idx = torch.arange(f * N, (f + 1) * N, device=c.device)
                     else:
-                        idx = torch.arange(f * N, E)
+                        idx = torch.arange(f * N, E, device=c.device)
                     c_p = c_r[idx]  # NxP
                     e_p = e_r[idx]  # NxC
                     m_p = m_r[idx] > 0.5  # Nx1
-                    var, weigths = variancenet(e_r)
                     z, log_jac_det = decoder(e_p, [c_p,])
-                    decoder_log_prob1 = get_logp(C, z, log_jac_det, var, weigths)
+                    decoder_log_prob1 = get_logp(
+                        C,
+                        z,
+                        log_jac_det,
+                        var,
+                        weights,
+                        distribution=c.distribution,
+                    )
                     log_prob1 = decoder_log_prob1 / C
-                    loss = -log_theta(log_prob1)
-                    test_loss += t2np(loss.sum())
-                    test_count += len(loss)
+                    test_loss += float((-log_prob1).sum().cpu())
+                    test_count += len(log_prob1)
                     test_dist[l] = test_dist[l] + log_prob1.detach().cpu().tolist()
+
+                    if collect_z and l == c.z_layer:
+                        take = min(len(z), fiber_budget)
+                        sample_idx = torch.randperm(len(z), device=z.device)[:take]
+                        latent_z.append(z[sample_idx].detach().cpu().numpy())
+                        latent_labels.append(
+                            m_p[sample_idx].reshape(-1).detach().cpu().numpy().astype(np.uint8)
+                        )
+                        latent_log_prob.append(
+                            log_prob1[sample_idx].detach().cpu().numpy()
+                        )
     #
     fps = len(loader.dataset) / (time.time() - start)
     mean_test_loss = test_loss / test_count
     if c.verbose:
         print('Epoch: {:d} \t test_loss: {:.4f} and {:.2f} fps'.format(epoch, mean_test_loss, fps))
-    return height, width, image_list, test_dist, gt_label_list, gt_mask_list, alpha_list, beta_list
+    latent_sample = None
+    if latent_z:
+        latent_sample = {
+            'z': np.concatenate(latent_z, axis=0),
+            'labels': np.concatenate(latent_labels, axis=0),
+            'log_prob': np.concatenate(latent_log_prob, axis=0),
+        }
+    return (
+        height,
+        width,
+        image_list,
+        test_dist,
+        gt_label_list,
+        gt_mask_list,
+        mean_test_loss,
+        latent_sample,
+    )
 
 
 def train(c):
-    run_date = datetime.datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
-    writer = SummaryWriter(f'scalar_{c.class_name}/')
+    run_date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    output_root = Path(c.output_dir)
+    tensorboard_dir = output_root / 'tensorboard' / c.dataset / c.class_name / c.distribution
+    writer = SummaryWriter(str(tensorboard_dir))
     L = c.pool_layers  # number of pooled layers
     #
     img_size = c.crp_size[0]
@@ -192,14 +246,15 @@ def train(c):
     MACA = [load_maca(pool_dim) for pool_dim in pool_dims]
     MACA = [ema.to(c.device) for ema in MACA]
     # K value
-    variancenets = [load_VarianceNet(pool_dim, 20) for pool_dim in pool_dims]
+    variancenets = [load_VarianceNet(pool_dim, c.num_components) for pool_dim in pool_dims]
     variancenets = [variancenet.to(c.device) for variancenet in variancenets]
     params = list(decoders[0].parameters())
     for l in range(1, L):
         params += list(decoders[l].parameters())
     for l in range(0, L):
         params += list(MACA[l].parameters())
-        params += list(variancenets[l].parameters())
+        if c.distribution == 'adaptive':
+            params += list(variancenets[l].parameters())
     auc_all = []
     # optimizer
     optimizer = torch.optim.Adam(params, lr=c.lr)
@@ -208,7 +263,6 @@ def train(c):
     # task data
     if c.dataset == 'mvtec':
         test_dataset = MVTecDataset(c, is_train=False)
-        train_dataset = MVTecDataset(c, is_train=True)
         anomaly_dataset = MVTecPseudoDataset(c, is_train=True)
     elif c.dataset == 'visa':
         test_dataset = VISA(c, is_train=False)
@@ -226,6 +280,26 @@ def train(c):
         anomaly_dataset = BTAD(c, is_train=True)
     else:
         raise NotImplementedError('{} is not supported dataset!'.format(c.dataset))
+
+    curve_path = (
+        output_root / 'curves' / c.dataset / c.class_name / c.distribution /
+        'run_{}.csv'.format(c.run_name)
+    )
+    curve_recorder = CurveRecorder(
+        curve_path,
+        {
+            'dataset': c.dataset,
+            'class_name': c.class_name,
+            'distribution': c.distribution,
+            'run_name': c.run_name,
+            'seed': c.seed,
+            'num_components': c.num_components,
+            'meta_epochs': c.meta_epochs,
+            'sub_epochs': c.sub_epochs,
+            'data_path': os.path.abspath(c.data_path),
+            'started_at': run_date,
+        },
+    )
 
     train_loader = DataLoader(anomaly_dataset, batch_size=c.batch_size, shuffle=True, pin_memory=False, drop_last = True)
     #anomaly_train_loader = DataLoader(anomaly_dataset, batch_size=c.batch_size, shuffle=True, pin_memory=False, drop_last = True)
@@ -252,13 +326,44 @@ def train(c):
     for epoch in range(c.meta_epochs):
         if c.action_type == 'norm-test' and c.checkpoint:
             load_weights_var(MACA, variancenets, decoders, c.checkpoint)  # avoid unnecessary saves)
+            train_stats = {'loss': np.nan, 'nll': np.nan, 'bce': np.nan}
         elif c.action_type == 'norm-train':
             print('Train meta epoch: {}'.format(epoch))
-            train_meta_epoch(c, epoch, train_loader, encoder, decoders, variancenets, optimizer, N, writer, pool_layers, MACA)
+            train_stats = train_meta_epoch(
+                c,
+                epoch,
+                train_loader,
+                encoder,
+                decoders,
+                variancenets,
+                optimizer,
+                writer,
+                pool_layers,
+                MACA,
+            )
         else:
             raise NotImplementedError('{} is not supported action type!'.format(c.action_type))
 
-        height, width, test_image_list, test_dist, gt_label_list, gt_mask_list, log_alpha, log_beta = test_meta_epoch(c, epoch, test_loader, encoder, decoders, variancenets, N, pool_layers, MACA)
+        (
+            height,
+            width,
+            test_image_list,
+            test_dist,
+            gt_label_list,
+            gt_mask_list,
+            mean_test_loss,
+            latent_sample,
+        ) = test_meta_epoch(
+            c,
+            epoch,
+            test_loader,
+            encoder,
+            decoders,
+            variancenets,
+            N,
+            pool_layers,
+            MACA,
+        )
         test_map = [list() for p in pool_layers]
         for l, p in enumerate(pool_layers):
             test_norm = torch.tensor(test_dist[l], dtype=torch.double)  # EHWx1
@@ -267,7 +372,7 @@ def train(c):
             test_mask = test_prob.reshape(-1, height[l], width[l])
             # upsample
             test_map[l] = F.interpolate(test_mask.unsqueeze(1),
-                                        size=c.crp_size, mode='bilinear', align_corners=True).squeeze().numpy()
+                                        size=c.crp_size, mode='bilinear', align_corners=True).squeeze(1).numpy()
         # score aggregation
         score_map = np.zeros_like(test_map[0])
         for l, p in enumerate(pool_layers):
@@ -315,6 +420,7 @@ def train(c):
             #save_weights_var(acas, variancenets, decoders, c.model, run_date)  # avoid unnecessary saves
         # calculate segmentation AUPRO
         # from https://github.com/YoungGod/DFR:
+        seg_pro_auc = 0.0
         if c.pro:  # and (epoch % 4 == 0):  # AUPRO is expensive to compute
             max_step = 1000
             expect_fpr = 0.3  # default 30%
@@ -383,25 +489,49 @@ def train(c):
         else:
             auc_all += [[epoch, 100*seg_roc_auc, 100*det_roc_auc, 0]]
 
+        curve_recorder.append(
+            epoch=epoch,
+            train_loss=train_stats['loss'],
+            train_nll=train_stats['nll'],
+            train_bce=train_stats['bce'],
+            test_loss=mean_test_loss,
+            det_auroc=100.0 * det_roc_auc,
+            seg_auroc=100.0 * seg_roc_auc,
+            det_ap=100.0 * det_ap,
+            seg_ap=100.0 * seg_ap,
+        )
+
+        if latent_sample is not None:
+            latent_path = (
+                output_root / 'latents' / c.dataset / c.class_name /
+                '{}_run{}_layer{}.npz'.format(c.distribution, c.run_name, c.z_layer)
+            )
+            saved_path = save_latent_sample(
+                latent_path,
+                latent_sample['z'],
+                latent_sample['labels'],
+                latent_sample['log_prob'],
+                {
+                    'dataset': c.dataset,
+                    'class_name': c.class_name,
+                    'distribution': c.distribution,
+                    'run_name': c.run_name,
+                    'seed': c.seed,
+                    'epoch': epoch,
+                    'layer': c.z_layer,
+                    'num_components': c.num_components,
+                },
+                c.z_max_samples,
+                c.seed,
+            )
+            print('Saved latent sample to {}'.format(saved_path))
+
     save_all(auc_all, c.class_name, run_date)
 
-    # export visualuzations
+    # Legacy anomaly-map exports were missing from the provided source tree.
+    # Revision plots are produced by plot_revision_experiments.py instead.
     if c.viz:
-        precision, recall, thresholds = precision_recall_curve(gt_label, score_label)
-        a = 2 * precision * recall
-        b = precision + recall
-        f1 = np.divide(a, b, out=np.zeros_like(a), where=b != 0)
-        det_threshold = thresholds[np.argmax(f1)]
-        print('Optimal DET Threshold: {:.2f}'.format(det_threshold))
-        precision, recall, thresholds = precision_recall_curve(gt_mask.flatten(), super_mask.flatten())
-        a = 2 * precision * recall
-        b = precision + recall
-        f1 = np.divide(a, b, out=np.zeros_like(a), where=b != 0)
-        seg_threshold = thresholds[np.argmax(f1)]
-        print('Optimal SEG Threshold: {:.2f}'.format(seg_threshold))
-        export_groundtruth(c, test_image_list, gt_mask)
-        export_scores(c, test_image_list, super_mask, gt_mask, seg_threshold, 'normal')
-        export_test_images(c, test_image_list, gt_mask, super_mask, seg_threshold)
-        export_hist(c, gt_mask, super_mask, seg_threshold)
+        print('The legacy --viz exporter was not included in the supplied code; '
+              'use plot_revision_experiments.py for revision figures.')
 
     writer.close()

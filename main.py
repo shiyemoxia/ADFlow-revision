@@ -43,8 +43,15 @@ def main(c):
     c.clamp_alpha = 1.9 
     c.dropout = 0.0  
     # dataloader parameters
+    default_data_paths = {
+        'mvtec': '../mvtec-ad',
+        'visa': '../visa',
+        'visa-new': '../visa-new',
+        'mvtec-loco': '../mvtec-loco',
+        'btad': '../btad',
+    }
     if c.dataset == 'mvtec':
-        c.data_path = '../mvtec-ad'
+        c.data_path = c.data_path or default_data_paths[c.dataset]
         c.condition_vec = 512
     # elif c.dataset == 'stc':
     #     c.data_path = '../../../STC'
@@ -53,16 +60,16 @@ def main(c):
     #     c.data_path == '../../../CIFAR10'
     #     c.condition_vec = 128
     elif c.dataset == 'visa':
-          c.data_path = '../visa'
+          c.data_path = c.data_path or default_data_paths[c.dataset]
           c.condition_vec = 512
     elif c.dataset == 'visa-new':
-          c.data_path = '../visa-new'
+          c.data_path = c.data_path or default_data_paths[c.dataset]
           c.condition_vec = 512
     elif c.dataset == 'mvtec-loco':
-          c.data_path = '../mvtec-loco'
+          c.data_path = c.data_path or default_data_paths[c.dataset]
           c.condition_vec = 512
     elif c.dataset == 'btad':
-          c.data_path='../btad'
+          c.data_path = c.data_path or default_data_paths[c.dataset]
           c.condition_vec = 512
     else:
         raise NotImplementedError('{} is not supported dataset!'.format(c.dataset))
@@ -90,12 +97,20 @@ def main(c):
     ########
     os.environ['CUDA_VISIBLE_DEVICES'] = c.gpu
     c.use_cuda = not c.no_cuda and torch.cuda.is_available()
-    init_seeds(seed=int(time.time()))
+    if c.num_components <= 0:
+        mvtec_textures = {'carpet', 'grid', 'leather', 'tile', 'wood'}
+        c.num_components = 10 if c.dataset == 'mvtec' and c.class_name in mvtec_textures else 20
+    if c.distribution == 'standard':
+        c.num_components = 1
+    if not os.path.isdir(c.data_path):
+        raise FileNotFoundError('Dataset directory not found: {}'.format(os.path.abspath(c.data_path)))
+    if not 0 <= c.z_layer < c.pool_layers:
+        raise ValueError('--z-layer must be between 0 and {}'.format(c.pool_layers - 1))
+    init_seeds(seed=c.seed)
     c.device = torch.device("cuda" if c.use_cuda else "cpu")
     # selected function:
     if c.action_type in ['norm-train', 'norm-test']:
         train(c)
     else:
         raise NotImplementedError('{} is not supported action-type!'.format(c.action_type))
-
 
