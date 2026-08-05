@@ -17,7 +17,7 @@ from custom_datasets import *
 from custom_models import *
 from model import load_maca, load_VarianceNet
 import torchvision.transforms as transforms
-from experiment_utils import CurveRecorder, save_latent_sample
+from experiment_utils import CurveRecorder, MACAWeightRecorder, save_latent_sample
 from utils import Score_Observer, rescale, t2np
 
 OUT_DIR = './viz/'
@@ -300,6 +300,26 @@ def train(c):
             'started_at': run_date,
         },
     )
+    maca_weight_path = (
+        output_root / 'maca_weights' / c.dataset / c.class_name / c.distribution /
+        'run_{}.csv'.format(c.run_name)
+    )
+    maca_weight_recorder = MACAWeightRecorder(
+        maca_weight_path,
+        pool_layers,
+        {
+            'dataset': c.dataset,
+            'class_name': c.class_name,
+            'distribution': c.distribution,
+            'run_name': c.run_name,
+            'seed': c.seed,
+            'meta_epochs': c.meta_epochs,
+            'parameter_definition': (
+                'Each MACA layer contains scalar rate1=alpha and rate2=beta; '
+                'the exported vectors concatenate the scalars in pool_layers order.'
+            ),
+        },
+    )
 
     train_loader = DataLoader(anomaly_dataset, batch_size=c.batch_size, shuffle=True, pin_memory=False, drop_last = True)
     #anomaly_train_loader = DataLoader(anomaly_dataset, batch_size=c.batch_size, shuffle=True, pin_memory=False, drop_last = True)
@@ -500,6 +520,28 @@ def train(c):
             det_ap=100.0 * det_ap,
             seg_ap=100.0 * seg_ap,
         )
+
+        alpha_vector = [float(aca.rate1.detach().cpu().item()) for aca in MACA]
+        beta_vector = [float(aca.rate2.detach().cpu().item()) for aca in MACA]
+        maca_weight_recorder.append(
+            epoch,
+            alpha_vector,
+            beta_vector,
+            100.0 * det_roc_auc,
+            100.0 * seg_roc_auc,
+        )
+        for layer_name, alpha_value, beta_value in zip(
+            pool_layers, alpha_vector, beta_vector
+        ):
+            writer.add_scalar('MACA/{}/alpha'.format(layer_name), alpha_value, epoch)
+            writer.add_scalar('MACA/{}/beta'.format(layer_name), beta_value, epoch)
+        if c.verbose:
+            print('MACA alpha vector: {}'.format(
+                np.array2string(np.asarray(alpha_vector), precision=6)
+            ))
+            print('MACA beta vector:  {}'.format(
+                np.array2string(np.asarray(beta_vector), precision=6)
+            ))
 
         if latent_sample is not None:
             latent_path = (

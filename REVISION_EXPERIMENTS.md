@@ -48,7 +48,7 @@ The default representative categories are:
 Run all available datasets sequentially on one GPU:
 
 ```bash
-python run_revision_experiments.py --experiment 3 --meta-epochs 15
+python run_revision_experiments.py --experiment 3 --meta-epochs 100
 ```
 
 If MVTec AD has not finished downloading, start with LOCO and VisA:
@@ -57,13 +57,21 @@ If MVTec AD has not finished downloading, start with LOCO and VisA:
 python run_revision_experiments.py \
   --experiment 3 \
   --datasets mvtec-loco visa \
-  --meta-epochs 15
+  --meta-epochs 100
 ```
 
-The script writes one CSV per category and creates both PNG and PDF versions of
-the overall mean curve under `results_revision/figures/`. The curve averages the
-raw per-feature-dimension loss. Flow log densities include the Jacobian term, so a
-valid converged loss may be negative and must not be divided by its first value.
+Experiment 3 defaults to 100 epochs when `--meta-epochs` is omitted. The script
+writes one CSV per category and creates PNG and PDF versions of both the raw and
+per-category min-max normalized overall mean curves under
+`results_revision/figures/`. Flow log densities include the Jacobian term, so a
+valid converged raw loss may be negative. The normalized curve is intended for the
+paper because it emphasizes the common convergence trend across datasets.
+
+The learnable MACA weights are also recorded at every epoch under
+`results_revision/maca_weights/`. Each MACA layer contains scalar alpha and beta
+weights; concatenating the three layer-wise values produces the exported alpha and
+beta vectors. The JSON file includes the final vectors and the vectors associated
+with the best image-level and pixel-level AUROC.
 
 ## Experiment 4: Z before/after AD
 
@@ -84,8 +92,8 @@ python run_revision_experiments.py \
 ```
 
 The final test epoch saves sampled Z vectors. A joint PCA basis is fitted to the
-before/after samples, then Gaussian KDE is used to create comparable multi-peak 3D
-density surfaces under `results_revision/figures/z_surfaces/`.
+before/after samples, then Gaussian KDE is used to create comparable 3D density
+surfaces under `results_revision/figures/z_surfaces/`.
 
-The revision request explicitly permits any converged state, so increasing epochs is
-optional and should be based on whether the loss curve has visibly stabilized.
+Experiment 4 still defaults to 10 epochs because its purpose is to extract Z at a
+representative converged state rather than reproduce the final paper metrics.

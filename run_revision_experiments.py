@@ -50,8 +50,12 @@ def main():
     parser.add_argument('--datasets', nargs='+',
                         choices=['mvtec', 'mvtec-loco', 'visa'],
                         default=['mvtec', 'mvtec-loco', 'visa'])
-    parser.add_argument('--meta-epochs', default=15, type=int,
-                        help='arbitrary converged state is sufficient for revision plots')
+    parser.add_argument(
+        '--meta-epochs',
+        default=None,
+        type=int,
+        help='reported epochs (default: 100 for experiment 3, 10 for experiment 4)',
+    )
     parser.add_argument('--sub-epochs', default=1, type=int)
     parser.add_argument('--batch-size', default=8, type=int)
     parser.add_argument('--workers', default=4, type=int)
@@ -61,6 +65,8 @@ def main():
     parser.add_argument('--z-max-samples', default=5000, type=int)
     parser.add_argument('--output-dir', default='results_revision')
     args = parser.parse_args()
+    if args.meta_epochs is None:
+        args.meta_epochs = 100 if args.experiment == '3' else 10
 
     selected = EXPERIMENT_3 if args.experiment == '3' else EXPERIMENT_4
     for dataset in args.datasets:
@@ -73,17 +79,22 @@ def main():
                 run_one(args, dataset, class_name, 'adaptive', save_z=True)
 
     if args.experiment == '3':
-        output = Path(args.output_dir) / 'figures' / 'overall_average_convergence.png'
-        command = [
-            sys.executable,
-            'plot_revision_experiments.py',
-            'curve',
-            '--curve-root', str(Path(args.output_dir) / 'curves'),
-            '--output', str(output),
-            '--normalize', 'none',
-        ]
-        print('\n>>> {}'.format(' '.join(command)), flush=True)
-        subprocess.run(command, check=True)
+        figure_dir = Path(args.output_dir) / 'figures'
+        curve_root = Path(args.output_dir) / 'curves'
+        for filename, normalization in (
+            ('overall_average_convergence.png', 'none'),
+            ('overall_average_convergence_normalized.png', 'minmax'),
+        ):
+            command = [
+                sys.executable,
+                'plot_revision_experiments.py',
+                'curve',
+                '--curve-root', str(curve_root),
+                '--output', str(figure_dir / filename),
+                '--normalize', normalization,
+            ]
+            print('\n>>> {}'.format(' '.join(command)), flush=True)
+            subprocess.run(command, check=True)
     else:
         for dataset in args.datasets:
             for class_name in selected[dataset]:

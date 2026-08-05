@@ -56,7 +56,8 @@ def plot_average_curve(curve_root, output, metric, distribution, normalize):
     if not curves:
         raise ValueError('Curve files were found, but none contained at least two valid values')
     curves = np.stack([curve[:common_length] for curve in curves], axis=0)
-    epochs = np.arange(common_length)
+    # CSV epochs are zero-based internally; figures use the conventional 1..N labels.
+    epochs = np.arange(1, common_length + 1)
     mean = curves.mean(axis=0)
     std = curves.std(axis=0)
 
