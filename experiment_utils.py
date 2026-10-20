@@ -17,6 +17,8 @@ CURVE_FIELDS = (
     "seg_auroc",
     "det_ap",
     "seg_ap",
+    "test_fps",
+    "peak_vram_gib",
 )
 
 
@@ -54,8 +56,8 @@ class MACAWeightRecorder:
         self.metadata["layer_names"] = self.layer_names
 
     def append(self, epoch, alpha, beta, det_auroc, seg_auroc):
-        alpha = [float(value) for value in alpha]
-        beta = [float(value) for value in beta]
+        alpha = [None if value is None else float(value) for value in alpha]
+        beta = [None if value is None else float(value) for value in beta]
         if len(alpha) != len(self.layer_names) or len(beta) != len(self.layer_names):
             raise ValueError("alpha and beta must contain one scalar per MACA layer")
 

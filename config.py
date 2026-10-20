@@ -16,6 +16,8 @@ def get_args():
     parser.add_argument('-dec', '--dec-arch', default='daflow', type=str, metavar='A')
     parser.add_argument('-pl', '--pool-layers', default=3, type=int, metavar='L',
                         help='number of layers used in NF model (default: 3)')
+    parser.add_argument('--maca-scales', choices=['all', 'middle'], default='all',
+                        help='apply the ACmix-like block at all three feature scales or only the middle scale; the flow always uses all scales')
     parser.add_argument('-cb', '--coupling-blocks', default=8, type=int, metavar='L',
                         help='number of layers used in NF model (default: 8)')
     parser.add_argument('-run', '--run-name', default=0, type=int, metavar='C',
@@ -57,6 +59,10 @@ def get_args():
                         help='weight of the pseudo-anomaly BCE term')
     parser.add_argument('--output-dir', default='results_revision', type=str,
                         help='directory for curves, latent samples and figures')
+    parser.add_argument('--save-checkpoint', action='store_true',
+                        help='save final-epoch model weights for later heatmap inference')
+    parser.add_argument('--heatmap-targets', default='', type=str,
+                        help='UTF-8 text file containing exact dataset-root-relative test image paths, one per line; exports final-epoch maps only')
     parser.add_argument('--save-z', action='store_true',
                         help='save a sample of final-epoch latent vectors')
     parser.add_argument('--z-layer', default=1, type=int,

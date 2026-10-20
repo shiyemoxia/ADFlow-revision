@@ -106,6 +106,10 @@ def main(c):
         raise FileNotFoundError('Dataset directory not found: {}'.format(os.path.abspath(c.data_path)))
     if not 0 <= c.z_layer < c.pool_layers:
         raise ValueError('--z-layer must be between 0 and {}'.format(c.pool_layers - 1))
+    if c.maca_scales == 'middle' and c.pool_layers != 3:
+        raise ValueError('--maca-scales middle requires --pool-layers 3 for a controlled comparison')
+    if c.action_type == 'norm-test' and not c.checkpoint:
+        raise ValueError('--action-type norm-test requires --checkpoint')
     init_seeds(seed=c.seed)
     c.device = torch.device("cuda" if c.use_cuda else "cpu")
     # selected function:

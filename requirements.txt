@@ -10,3 +10,6 @@ tensorboard
 timm
 opencv-python-headless
 imgaug
+Pillow
+python-pptx
+pytest

@@ -1,0 +1,6 @@
+dataset,class_name,ppt_slide,ppt_shape,image,mask,image_sha256,verification
+mvtec,screw,7,3,screw/test/thread_side/019.png,screw/ground_truth/thread_side/019_mask.png,d0e07398d6e32a96b0b365cce04482a82911d19b8d2ed6a2f5fb66b09a0d5939,identical_PPT_bytes
+visa,capsules,7,1,capsules/Data/Images/Anomaly/087.JPG,capsules/Data/Masks/Anomaly/087.png,a6273f99e167646bf0ff921906bb039bd2eaaee6d8f8875e22c43239e32308d4,identical_PPT_bytes_and_test_split
+visa,macaroni2,7,5,macaroni2/Data/Images/Anomaly/045.JPG,macaroni2/Data/Masks/Anomaly/045.png,68e826a207b16983356a958436e5ff7990a53e38a1b90fb6b6ead545f5b3eaee,identical_PPT_bytes_and_test_split
+visa,pcb3,7,7,pcb3/Data/Images/Anomaly/037.JPG,pcb3/Data/Masks/Anomaly/037.png,52b80f2e1c14741aa64a9d611a6e587b85979a657675b6ed00999320fc8e6631,identical_PPT_bytes_and_test_split
+mvtec-loco,splicing_connectors,7,10,splicing_connectors/test/structural_anomalies/001.png,splicing_connectors/ground_truth/structural_anomalies/001/000.png,c514a6c8fb12e7ec222a1f47db526a5b7d2a9aaeaa6e1d51b782ed4298ef04d0,identical_PPT_bytes

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from sklearn.metrics import roc_auc_score, auc, precision_recall_curve, average_precision_score
@@ -18,6 +19,8 @@ from custom_models import *
 from model import load_maca, load_VarianceNet
 import torchvision.transforms as transforms
 from experiment_utils import CurveRecorder, MACAWeightRecorder, save_latent_sample
+from revision_artifacts import (export_heatmaps, load_revision_checkpoint,
+                                resolve_heatmap_targets, save_revision_checkpoint)
 from utils import Score_Observer, rescale, t2np
 
 OUT_DIR = './viz/'
@@ -225,12 +228,17 @@ def test_meta_epoch(c, epoch, loader, encoder, decoders, variancenets, N, pool_l
         gt_mask_list,
         mean_test_loss,
         latent_sample,
+        fps,
     )
 
 
 def train(c):
     run_date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     output_root = Path(c.output_dir)
+    # A checkpoint-only test must not replace the training curve, MACA weight
+    # history, TensorBoard events, or latent samples from the original run.
+    if c.action_type == 'norm-test':
+        output_root = output_root / 'inference'
     tensorboard_dir = output_root / 'tensorboard' / c.dataset / c.class_name / c.distribution
     writer = SummaryWriter(str(tensorboard_dir))
     L = c.pool_layers  # number of pooled layers
@@ -243,11 +251,22 @@ def train(c):
     # NF decoder
     decoders = [load_decoder_arch(c, pool_dim) for pool_dim in pool_dims]
     decoders = [decoder.to(c.device) for decoder in decoders]
-    MACA = [load_maca(pool_dim) for pool_dim in pool_dims]
+    active_scales = range(L) if c.maca_scales == 'all' else (1,)
+    # Instantiate all blocks in both arms before disabling scales so that the
+    # shared block and subsequent variance nets start from identical RNG states.
+    initialized_maca = [load_maca(pool_dim) for pool_dim in pool_dims]
+    MACA = [initialized_maca[l] if l in active_scales else nn.Identity()
+            for l in range(L)]
     MACA = [ema.to(c.device) for ema in MACA]
     # K value
     variancenets = [load_VarianceNet(pool_dim, c.num_components) for pool_dim in pool_dims]
     variancenets = [variancenet.to(c.device) for variancenet in variancenets]
+    optimized_modules = decoders + MACA + (variancenets if c.distribution == 'adaptive' else [])
+    trainable_parameters = sum(p.numel() for module in optimized_modules
+                               for p in module.parameters() if p.requires_grad)
+    maca_parameters = sum(p.numel() for module in MACA for p in module.parameters())
+    print('MACA scales: {}, trainable parameters: {}, MACA parameters: {}'.format(
+        c.maca_scales, trainable_parameters, maca_parameters))
     params = list(decoders[0].parameters())
     for l in range(1, L):
         params += list(decoders[l].parameters())
@@ -298,6 +317,10 @@ def train(c):
             'sub_epochs': c.sub_epochs,
             'data_path': os.path.abspath(c.data_path),
             'started_at': run_date,
+            'maca_scales': c.maca_scales,
+            'active_feature_layers': [pool_layers[l] for l in active_scales],
+            'trainable_parameters': trainable_parameters,
+            'maca_parameters': maca_parameters,
         },
     )
     maca_weight_path = (
@@ -314,9 +337,11 @@ def train(c):
             'run_name': c.run_name,
             'seed': c.seed,
             'meta_epochs': c.meta_epochs,
+            'maca_scales': c.maca_scales,
             'parameter_definition': (
                 'Each MACA layer contains scalar rate1=alpha and rate2=beta; '
-                'the exported vectors concatenate the scalars in pool_layers order.'
+                'the exported vectors concatenate the scalars in pool_layers order; '
+                'inactive feature layers have null weights.'
             ),
         },
     )
@@ -324,6 +349,8 @@ def train(c):
     train_loader = DataLoader(anomaly_dataset, batch_size=c.batch_size, shuffle=True, pin_memory=False, drop_last = True)
     #anomaly_train_loader = DataLoader(anomaly_dataset, batch_size=c.batch_size, shuffle=True, pin_memory=False, drop_last = True)
     test_loader = DataLoader(test_dataset, batch_size=c.batch_size, shuffle=False, drop_last=False, **kwargs)
+    heatmap_targets = (resolve_heatmap_targets(c.heatmap_targets, test_dataset, c.data_path)
+                       if c.heatmap_targets else [])
 
     N = 256 # hyperparameter that increases batch size for the decoder model by N
     inv_normalize = transforms.Normalize(
@@ -344,11 +371,16 @@ def train(c):
     if c.action_type == 'norm-test':
         c.meta_epochs = 1
     for epoch in range(c.meta_epochs):
+        if c.use_cuda:
+            torch.cuda.reset_peak_memory_stats(c.device)
         if c.action_type == 'norm-test' and c.checkpoint:
-            load_weights_var(MACA, variancenets, decoders, c.checkpoint)  # avoid unnecessary saves)
+            checkpoint = load_revision_checkpoint(c.checkpoint, c, MACA, variancenets, decoders)
+            print('Loaded checkpoint from epoch {}'.format(checkpoint['epoch']))
+            artifact_epoch = checkpoint['epoch']
             train_stats = {'loss': np.nan, 'nll': np.nan, 'bce': np.nan}
         elif c.action_type == 'norm-train':
             print('Train meta epoch: {}'.format(epoch))
+            artifact_epoch = epoch
             train_stats = train_meta_epoch(
                 c,
                 epoch,
@@ -373,6 +405,7 @@ def train(c):
             gt_mask_list,
             mean_test_loss,
             latent_sample,
+            test_fps,
         ) = test_meta_epoch(
             c,
             epoch,
@@ -519,10 +552,15 @@ def train(c):
             seg_auroc=100.0 * seg_roc_auc,
             det_ap=100.0 * det_ap,
             seg_ap=100.0 * seg_ap,
+            test_fps=test_fps,
+            peak_vram_gib=(torch.cuda.max_memory_allocated(c.device) / (1024 ** 3)
+                           if c.use_cuda else np.nan),
         )
 
-        alpha_vector = [float(aca.rate1.detach().cpu().item()) for aca in MACA]
-        beta_vector = [float(aca.rate2.detach().cpu().item()) for aca in MACA]
+        alpha_vector = [float(aca.rate1.detach().cpu().item()) if hasattr(aca, 'rate1') else None
+                        for aca in MACA]
+        beta_vector = [float(aca.rate2.detach().cpu().item()) if hasattr(aca, 'rate2') else None
+                       for aca in MACA]
         maca_weight_recorder.append(
             epoch,
             alpha_vector,
@@ -533,15 +571,32 @@ def train(c):
         for layer_name, alpha_value, beta_value in zip(
             pool_layers, alpha_vector, beta_vector
         ):
-            writer.add_scalar('MACA/{}/alpha'.format(layer_name), alpha_value, epoch)
-            writer.add_scalar('MACA/{}/beta'.format(layer_name), beta_value, epoch)
+            if alpha_value is not None:
+                writer.add_scalar('MACA/{}/alpha'.format(layer_name), alpha_value, epoch)
+                writer.add_scalar('MACA/{}/beta'.format(layer_name), beta_value, epoch)
         if c.verbose:
             print('MACA alpha vector: {}'.format(
-                np.array2string(np.asarray(alpha_vector), precision=6)
+                str(alpha_vector)
             ))
             print('MACA beta vector:  {}'.format(
-                np.array2string(np.asarray(beta_vector), precision=6)
+                str(beta_vector)
             ))
+
+        if epoch == c.meta_epochs - 1:
+            if c.save_checkpoint and c.action_type == 'norm-train':
+                checkpoint_path = (output_root / 'checkpoints' / c.dataset / c.class_name /
+                                   c.distribution / 'run_{}_last.pt'.format(c.run_name))
+                saved = save_revision_checkpoint(
+                    checkpoint_path, c, epoch, MACA, variancenets, decoders,
+                    {'det_auroc': 100.0 * det_roc_auc, 'seg_auroc': 100.0 * seg_roc_auc},
+                )
+                print('Saved final-epoch checkpoint to {}'.format(saved))
+            if heatmap_targets:
+                heatmap_root = (output_root / 'heatmaps' / c.dataset / c.class_name /
+                                c.distribution / 'run_{}'.format(c.run_name))
+                exported = export_heatmaps(heatmap_root, c, artifact_epoch, test_dataset,
+                                           super_mask, heatmap_targets)
+                print('Exported {} matched heatmaps to {}'.format(len(exported), heatmap_root))
 
         if latent_sample is not None:
             latent_path = (
